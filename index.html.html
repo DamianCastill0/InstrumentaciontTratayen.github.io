@@ -1,0 +1,684 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#1e40af">
+    <meta name="description" content="Control de Instrumentación - Planta Tratayén">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Control I&C">
+    <title>Control de Instrumentación - Planta Tratayén</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.3; } 100% { opacity: 1; } }
+        .animate-blink { animation: blink 1s infinite; }
+    </style>
+</head>
+
+<body>
+    <div id="root"></div>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-database-compat.js"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <script>
+        const firebaseConfig = {
+            apiKey: "AIzaSyBTn7lmufgLCUvX3h8v1ZoaBCPm_qIz3MA",
+            authDomain: "psv-control-tratayen.firebaseapp.com",
+            databaseURL: "https://psv-control-tratayen-default-rtdb.firebaseio.com",
+            projectId: "psv-control-tratayen",
+            storageBucket: "psv-control-tratayen.firebasestorage.app",
+            messagingSenderId: "851186777433",
+            appId: "1:851186777433:web:3ed301625fcfea0666a048"
+        };
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+    </script>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        /* ============================================================
+           CONFIGURACIÓN DE PESTAÑAS
+           Para agregar una pestaña fija: copiar un bloque y cambiar
+           id, nombre, node (nombre del nodo en Firebase), meses
+           (cada cuántos meses vence) y extra (columnas propias).
+           También se pueden crear desde la página con el botón "+".
+           ============================================================ */
+        const MESES = 12;        // frecuencia de calibración (meses)
+        const DIAS_AVISO = 30;   // días antes del vencimiento para marcar "Por vencerse"
+
+        const TABS = [
+            {
+                id: 'psv', nombre: 'PSV', corto: 'PSV', singular: 'PSV', node: 'psvs', meses: MESES,
+                det: 'Detalles de la Válvula',
+                extra: [{ k: 'presionSet', l: 'Set Presión', type: 'presion' }]
+            },
+            {
+                id: 'mezcla', nombre: 'Detectores de Mezcla', corto: 'Detectores', singular: 'Detector', node: 'detectores_mezcla', meses: MESES,
+                m: true, det: 'Detalles del Detector',
+                extra: [{ k: 'rango', l: 'Rango' }, { k: 'gasPatron', l: 'Gas Patrón' }]
+            },
+            {
+                id: 'llama', nombre: 'Detectores de Llama', corto: 'Detectores', singular: 'Detector', node: 'detectores_llama', meses: MESES,
+                m: true, det: 'Detalles del Detector',
+                extra: [{ k: 'tipoSensor', l: 'Tipo de Sensor' }]
+            }
+        ];
+
+        const BASE = [{ k: 'area', l: 'Área' }, { k: 'tag', l: 'TAG' }, { k: 'equipo', l: 'Equipo' }, { k: 'ubicacion', l: 'Ubicación' }];
+
+        // Colores de las tarjetas de estado (por posición: 1° verde, 2° rojo, 3° ámbar)
+        const K = {
+            blue: { d: 'bg-blue-600/20 ring-2 ring-blue-500', l: 'bg-blue-50 ring-2 ring-blue-500', on: 'bg-blue-600 text-white', off: 'bg-blue-100 text-blue-600', bar: 'bg-blue-600' },
+            green: { d: 'bg-green-600/20 ring-2 ring-green-500', l: 'bg-green-50 ring-2 ring-green-500', on: 'bg-green-600 text-white', off: 'bg-green-100 text-green-600', bar: 'bg-green-600' },
+            red: { d: 'bg-red-600/20 ring-2 ring-red-500', l: 'bg-red-50 ring-2 ring-red-500', on: 'bg-red-600 text-white', off: 'bg-red-100 text-red-600', bar: 'bg-red-600' },
+            amber: { d: 'bg-amber-600/20 ring-2 ring-amber-500', l: 'bg-amber-50 ring-2 ring-amber-500', on: 'bg-amber-600 text-white', off: 'bg-amber-100 text-amber-600', bar: 'bg-amber-600' },
+            rose: { d: 'bg-rose-900/40 ring-2 ring-rose-500', l: 'bg-rose-50 ring-2 ring-rose-500', on: 'bg-rose-600 text-white animate-pulse', off: 'bg-rose-100 text-rose-600', bar: 'bg-rose-600' }
+        };
+        const ICON = {
+            all: 'M4 6h16M4 10h16M4 14h16M4 18h16',
+            ok: 'M5 13l4 4L19 7',
+            lock: 'M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z',
+            trash: 'M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16',
+            chart: 'M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z',
+            clock: 'M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z',
+            warn: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z'
+        };
+
+        /* ---------- Utilidades de fecha ---------- */
+        const formatearFecha = (f) => {
+            if (!f) return 'S/D';
+            const [y, m, d] = f.split('-');
+            return `${d}-${m}-${y.slice(-2)}`;
+        };
+        const getProximaFecha = (f, meses = 12) => {
+            if (!f) return 'S/D';
+            const [y, m, d] = f.split('-').map(Number);
+            const v = new Date(y, m - 1 + meses, d);
+            return `${String(v.getDate()).padStart(2, '0')}-${String(v.getMonth() + 1).padStart(2, '0')}-${v.getFullYear()}`;
+        };
+        const getVencimientoInfo = (f, meses = 12, masc = false) => {
+            if (!f) return { color: '', label: 'S/D', days: 999, blink: false };
+            const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+            const [y, m, d] = f.split('-').map(Number);
+            const v = new Date(y, m - 1 + meses, d); v.setHours(0, 0, 0, 0);
+            const n = Math.round((v - hoy) / 86400000);
+            if (n < 0) {
+                const a = Math.abs(n);
+                return { color: 'bg-red-600 text-white', label: `${a} ${a === 1 ? 'día' : 'días'} ${masc ? 'vencido' : 'vencida'}`, days: n, blink: true };
+            }
+            if (n === 0) return { color: 'bg-red-600 text-white', label: 'VENCE HOY', days: 0, blink: true };
+            if (n <= 3) return { color: 'bg-red-500 text-white font-bold', label: n + (n === 1 ? ' día' : ' días'), days: n, blink: false };
+            if (n <= 10) return { color: 'bg-yellow-400 text-gray-900 font-bold', label: n + ' días', days: n, blink: false };
+            return { color: 'bg-green-100 text-green-800', label: n + ' días', days: n, blink: false };
+        };
+        // Estado calculado a partir de la fecha de calibración
+        const getEstado = (f, meses = MESES, masc = false) => {
+            if (!f) return { key: 'sd', label: 'Sin fecha', cls: 'bg-gray-100 text-gray-700' };
+            const n = getVencimientoInfo(f, meses, masc).days;
+            if (n <= 0) return { key: 'vencida', label: masc ? 'Vencido' : 'Vencida', cls: 'bg-red-100 text-red-800' };
+            if (n <= DIAS_AVISO) return { key: 'porVencer', label: 'Por vencerse', cls: 'bg-yellow-100 text-yellow-800' };
+            return { key: 'vigencia', label: 'En vigencia', cls: 'bg-green-100 text-green-800' };
+        };
+        const renderPresion = (r) => {
+            if (!r.presionSet) return '---';
+            const s = String(r.presionSet).toLowerCase();
+            if (s.includes('psi') || s.includes('bar') || s.includes('kg/cm')) return r.presionSet;
+            return `${r.presionSet} ${r.unidadPresion || 'PSI'}`;
+        };
+        const valorCampo = (f, r) => f.type === 'presion' ? renderPresion(r) : (r[f.k] || '---');
+
+        /* ============================================================
+           PANEL DE UNA PESTAÑA (mismo formato para todas)
+           ============================================================ */
+        function Panel({ tab, user, dark }) {
+            const [data, setData] = useState([]);
+            const [q, setQ] = useState('');
+            const [area, setArea] = useState('all');
+            const [fe, setFe] = useState('all');
+            const [form, setForm] = useState(null);   // sin id = nuevo, con id = edición
+            const [det, setDet] = useState(null);
+            const [dups, setDups] = useState(null);
+            const can = user.role === 'admin' || user.autorizado;
+            const meses = tab.meses || 12;
+            const tx = dark ? 'text-gray-300' : 'text-gray-900';
+            const inp = `px-4 py-2 border rounded-lg w-full ${dark ? 'bg-gray-700 text-white border-gray-600' : 'bg-white text-gray-900'}`;
+            const lbl = `text-xs font-bold uppercase ${dark ? 'text-gray-400' : 'text-gray-500'}`;
+
+            useEffect(() => {
+                const r = database.ref(tab.node);
+                r.on('value', (s) => {
+                    const v = s.val();
+                    setData(v ? Object.entries(v).map(([id, x]) => ({ id, ...x })) : []);
+                });
+                return () => r.off();
+            }, [tab.node]);
+
+            const vacio = () => {
+                const o = { area: '', tag: '', equipo: '', ubicacion: '', unidadPresion: 'PSI', observaciones: '', fechaCalibracion: '' };
+                tab.extra.forEach(f => { o[f.k] = ''; });
+                return o;
+            };
+            const info = (r) => getVencimientoInfo(r.fechaCalibracion, meses, tab.m);
+            const areas = [...new Set(data.map(r => r.area).filter(Boolean))].sort();
+
+            const filtradas = useMemo(() => data.filter(r => {
+                const t = q.toLowerCase();
+                const okQ = [r.tag, r.equipo, r.ubicacion, r.area].some(v => v?.toLowerCase().includes(t));
+                const okA = area === 'all' || r.area === area;
+                const okE = fe === 'all' || getEstado(r.fechaCalibracion, meses).key === fe;
+                return okQ && okA && okE;
+            }), [data, q, area, fe]);
+
+            const stats = useMemo(() => ({
+                total: data.length,
+                vigencia: data.filter(r => getEstado(r.fechaCalibracion, meses).key === 'vigencia').length,
+                porVencer: data.filter(r => getEstado(r.fechaCalibracion, meses).key === 'porVencer').length,
+                vencidas: data.filter(r => getEstado(r.fechaCalibracion, meses).key === 'vencida').length
+            }), [data]);
+
+            const save = () => {
+                if (!form.tag || !form.area) { alert('El TAG y el Área son obligatorios'); return; }
+                const { id, ...v } = form;
+                const op = id ? database.ref(`${tab.node}/${id}`).update(v) : database.ref(tab.node).push(v);
+                op.then(() => setForm(null)).catch(e => alert('Error al guardar: ' + e.message));
+            };
+            const del = (r) => {
+                if (!can) { alert('No tienes autorización para eliminar'); return; }
+                if (window.confirm(`¿Está seguro de eliminar ${r.tag}?`)) database.ref(`${tab.node}/${r.id}`).remove();
+            };
+            const guardarObs = (r, v) => {
+                if (!can) { alert('No tienes autorización para realizar cambios'); return; }
+                database.ref(`${tab.node}/${r.id}`).update({ observaciones: v });
+            };
+            const buscarDup = () => {
+                const m = {};
+                data.forEach(r => { const t = r.tag?.trim().toLowerCase(); if (t) (m[t] = m[t] || []).push(r); });
+                const l = Object.values(m).filter(x => x.length > 1).map(x => ({ tag: x[0].tag, items: x }));
+                if (l.length === 0) { alert('✅ No se encontraron duplicados'); return; }
+                setDups(l);
+            };
+
+            const campoPresion = (f) => (
+                <div className="flex gap-2">
+                    <input type="text" placeholder="Valor" value={form[f.k] || ''} onChange={e => setForm({ ...form, [f.k]: e.target.value })} className={`flex-1 ${inp}`} />
+                    <select value={form.unidadPresion || 'PSI'} onChange={e => {
+                        const limpio = String(form[f.k] || '').replace(/psi/gi, '').replace(/bar/gi, '').replace(/kg\/cm2/gi, '').replace(/kg\/cm²/gi, '').trim();
+                        setForm({ ...form, unidadPresion: e.target.value, [f.k]: limpio });
+                    }} className={`w-24 px-2 py-2 border rounded-lg ${dark ? 'bg-gray-700 text-white border-gray-600' : 'bg-white'}`}>
+                        <option value="PSI">PSI</option><option value="Bar">Bar</option><option value="Kg/cm²">Kg/cm²</option>
+                    </select>
+                </div>
+            );
+
+            const formBody = form && (
+                <>
+                    <h3 className={`text-xl font-bold mb-4 ${dark ? 'text-white' : 'text-gray-900'}`}>
+                        {form.id ? `Editar ${tab.singular}: ${form.tag}` : `Nuevo ${tab.singular}`}
+                    </h3>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                        {BASE.map(f => (
+                            <div key={f.k} className="flex flex-col gap-1">
+                                <label className={lbl}>{f.l}</label>
+                                <input type="text" list={f.k === 'area' ? 'lista-areas' : undefined} placeholder={f.k === 'tag' || f.k === 'area' ? f.l + ' *' : f.l}
+                                    value={form[f.k] || ''} onChange={e => setForm({ ...form, [f.k]: e.target.value })} className={inp} />
+                            </div>
+                        ))}
+                        <datalist id="lista-areas">{areas.map(a => <option key={a} value={a} />)}</datalist>
+                        {tab.extra.map(f => (
+                            <div key={f.k} className="flex flex-col gap-1">
+                                <label className={lbl}>{f.l}</label>
+                                {f.type === 'presion' ? campoPresion(f) :
+                                    <input type="text" value={form[f.k] || ''} onChange={e => setForm({ ...form, [f.k]: e.target.value })} className={inp} />}
+                            </div>
+                        ))}
+                        <div className="flex flex-col gap-1">
+                            <label className={lbl}>Fecha Calibración</label>
+                            <input type="date" value={form.fechaCalibracion || ''} onChange={e => setForm({ ...form, fechaCalibracion: e.target.value })} className={inp} />
+                            {form.fechaCalibracion && <p className="text-[10px] text-blue-500 font-bold">Vence: {getProximaFecha(form.fechaCalibracion, meses)}</p>}
+                        </div>
+                        <div className="flex flex-col gap-1 md:col-span-3">
+                            <label className={lbl}>Observaciones</label>
+                            <textarea value={form.observaciones || ''} onChange={e => setForm({ ...form, observaciones: e.target.value })} className={`${inp} min-h-[80px]`}></textarea>
+                        </div>
+                    </div>
+                    <div className="mt-4 flex gap-3">
+                        <button onClick={save} className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">✓ Guardar</button>
+                        <button onClick={() => setForm(null)} className="px-6 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600">✗ Cancelar</button>
+                    </div>
+                </>
+            );
+
+            const tarjetas = [
+                { v: 'all', t: `Total ${tab.corto}`, n: stats.total, c: 'blue', i: ICON.all },
+                { v: 'vigencia', t: 'En vigencia', n: stats.vigencia, c: 'green', i: ICON.ok },
+                { v: 'porVencer', t: 'Por vencerse', n: stats.porVencer, c: 'amber', i: ICON.clock },
+                { v: 'cumplimiento', t: 'Cumplimiento', n: stats.total ? (stats.vigencia / stats.total * 100).toFixed(1) + '%' : '--', pct: stats.total ? stats.vigencia / stats.total * 100 : 0, c: 'blue', i: ICON.chart },
+                { v: 'vencida', t: tab.m ? 'Vencidos' : 'Vencidas', n: stats.vencidas, c: 'rose', i: ICON.warn }
+            ];
+
+            return (
+                <div className="max-w-7xl mx-auto p-6">
+                    {can && (
+                        <div className="mb-4 flex gap-3 flex-wrap">
+                            <button onClick={() => setForm(form && !form.id ? null : vacio())} className="px-6 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-semibold">➕ Agregar Nuevo {tab.singular}</button>
+                            <button onClick={buscarDup} className="px-6 py-3 bg-orange-600 text-white rounded-lg hover:bg-orange-700 font-semibold">🔍 Buscar Duplicados</button>
+                        </div>
+                    )}
+
+                    {form && !form.id && <div className={`${dark ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow p-6 mb-6`}>{formBody}</div>}
+
+                    <div className={`${dark ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow p-4 mb-6`}>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <input type="text" placeholder="Buscar por TAG, Equipo, Ubicación o Área..." value={q} onChange={e => setQ(e.target.value)} className={inp} />
+                            <select value={area} onChange={e => setArea(e.target.value)} className={inp}>
+                                <option value="all">Todas las áreas</option>
+                                {areas.map(a => <option key={a} value={a}>{a}</option>)}
+                            </select>
+                        </div>
+                    </div>
+
+                    <div className={`grid grid-cols-1 sm:grid-cols-2 gap-4 mb-8 lg:grid-cols-5`}>
+                        {tarjetas.map(c => {
+                            const on = fe === c.v, k = K[c.c];
+                            if (c.pct !== undefined) return (
+                                <div key={c.v} title="En vigencia ÷ total de equipos" className={`relative overflow-hidden rounded-2xl ${dark ? 'bg-gray-800' : 'bg-white shadow-sm border border-gray-100'}`}>
+                                    <div className="p-5 flex items-center gap-4">
+                                        <div className={`p-3 rounded-xl ${k.on}`}>
+                                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={c.i} /></svg>
+                                        </div>
+                                        <div className="text-left">
+                                            <h3 className={`text-xs font-bold uppercase tracking-wider ${dark ? 'text-gray-400' : 'text-gray-500'}`}>{c.t}</h3>
+                                            <p className={`text-2xl font-black ${dark ? 'text-white' : 'text-gray-900'}`}>{c.n}</p>
+                                        </div>
+                                    </div>
+                                    <div className="absolute bottom-0 left-0 w-full h-1 bg-gray-200"><div className={`h-1 ${k.bar}`} style={{ width: c.pct + '%' }}></div></div>
+                                </div>
+                            );
+                            return (
+                                <button key={c.v} onClick={() => setFe(c.v)}
+                                    className={`relative group overflow-hidden rounded-2xl transition-all duration-300 transform hover:-translate-y-1 hover:shadow-xl ${on ? (dark ? k.d : k.l) : (dark ? 'bg-gray-800' : 'bg-white shadow-sm border border-gray-100')}`}>
+                                    <div className="p-5 flex items-center gap-4">
+                                        <div className={`p-3 rounded-xl transition-colors ${on ? k.on : k.off}`}>
+                                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d={c.i} /></svg>
+                                        </div>
+                                        <div className="text-left">
+                                            <h3 className={`text-xs font-bold uppercase tracking-wider ${dark ? 'text-gray-400' : 'text-gray-500'}`}>{c.t}</h3>
+                                            <p className={`text-2xl font-black ${c.c === 'rose' ? (dark ? 'text-rose-600' : 'text-rose-700') : (dark ? 'text-white' : 'text-gray-900')}`}>{c.n}</p>
+                                        </div>
+                                    </div>
+                                    {on && <div className={`absolute bottom-0 left-0 w-full h-1 ${k.bar}`}></div>}
+                                </button>
+                            );
+                        })}
+                    </div>
+
+                    <div className={`${dark ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow overflow-hidden`}>
+                        <div className="overflow-x-auto">
+                            <table className="w-full table-auto">
+                                <thead className={dark ? 'bg-gray-700' : 'bg-gray-100'}>
+                                    <tr>
+                                        {[...BASE, ...tab.extra, { l: 'Última Calib.' }, { l: 'Vencimiento' }, { l: 'Estado' }, { l: 'Próximo a Vencer' }, { l: 'Observaciones' }, { l: 'Acciones' }].map(f => (
+                                            <th key={f.l} className={`px-3 py-3 text-left text-xs font-semibold ${tx}`}>{f.l}</th>
+                                        ))}
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {filtradas.map(r => {
+                                        const i = info(r);
+                                        const es = getEstado(r.fechaCalibracion, meses, tab.m);
+                                        return (
+                                            <tr key={r.id} onClick={() => setDet(r)}
+                                                className={`border-b cursor-pointer transition-colors ${dark ? 'border-gray-700 hover:bg-gray-700/50' : 'border-gray-200 hover:bg-blue-50/50'}`}>
+                                                <td className={`px-3 py-2 text-xs ${tx}`}>{r.area}</td>
+                                                <td className={`px-3 py-2 font-mono text-xs font-bold whitespace-nowrap ${dark ? 'text-blue-400' : 'text-blue-600 underline'}`}>{r.tag}</td>
+                                                <td className={`px-3 py-2 text-xs ${tx}`}>{r.equipo}</td>
+                                                <td className={`px-3 py-2 text-xs ${tx}`}>{r.ubicacion}</td>
+                                                {tab.extra.map(f => <td key={f.k} className={`px-3 py-2 text-xs ${tx}`}>{valorCampo(f, r)}</td>)}
+                                                <td className={`px-3 py-2 text-xs whitespace-nowrap ${tx}`}>{formatearFecha(r.fechaCalibracion)}</td>
+                                                <td className={`px-3 py-2 text-xs whitespace-nowrap font-bold ${dark ? 'text-blue-400' : 'text-blue-700'}`}>{getProximaFecha(r.fechaCalibracion, meses)}</td>
+                                                <td className="px-3 py-2">
+                                                    <span className={`px-2 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${es.cls}`}>{es.label}</span>
+                                                </td>
+                                                <td className="px-3 py-2 text-xs">
+                                                    <span className={`px-2 py-1 rounded font-bold whitespace-nowrap inline-block ${i.color} ${i.blink ? 'animate-blink' : ''}`}>{i.label}</span>
+                                                </td>
+                                                <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
+                                                    <input type="text" value={r.observaciones || ''}
+                                                        onChange={e => { const v = e.target.value; setData(data.map(p => p.id === r.id ? { ...p, observaciones: v } : p)); }}
+                                                        onBlur={e => guardarObs(r, e.target.value)} disabled={!can}
+                                                        className={`w-full min-w-[150px] px-2 py-1 text-xs border rounded ${dark ? 'bg-gray-700 text-white border-gray-600' : 'bg-white text-gray-900'} ${!can ? 'opacity-50 cursor-not-allowed' : ''}`} />
+                                                </td>
+                                                <td className="px-3 py-2" onClick={e => e.stopPropagation()}>
+                                                    <div className="flex gap-1">
+                                                        {can && (<>
+                                                            <button onClick={() => setForm({ ...vacio(), ...r })} className="px-2 py-1 bg-blue-600 text-white rounded text-xs" title="Editar">✏️</button>
+                                                            <button onClick={() => del(r)} className="px-2 py-1 bg-red-600 text-white rounded text-xs" title="Eliminar">🗑️</button>
+                                                        </>)}
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                    {filtradas.length === 0 && (
+                                        <tr><td colSpan={9 + tab.extra.length} className={`px-3 py-8 text-center text-sm ${dark ? 'text-gray-400' : 'text-gray-500'}`}>
+                                            {data.length === 0 ? `Todavía no hay equipos en esta pestaña.${can ? ' Usá "Agregar Nuevo" para cargar el primero.' : ''}` : 'Ningún resultado con los filtros actuales.'}
+                                        </td></tr>
+                                    )}
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    {/* Editar */}
+                    {form && form.id && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+                            <div className={`${dark ? 'bg-gray-800' : 'bg-white'} rounded-lg p-6 max-w-4xl w-full max-h-[90vh] overflow-y-auto`}>{formBody}</div>
+                        </div>
+                    )}
+
+                    {/* Duplicados */}
+                    {dups && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+                            <div className={`${dark ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow-2xl p-6 max-w-4xl w-full max-h-[90vh] overflow-y-auto`}>
+                                <h2 className={`text-2xl font-bold mb-6 ${dark ? 'text-white' : 'text-gray-900'}`}>🔍 Duplicados</h2>
+                                <div className="space-y-4">
+                                    {dups.map((d, i) => (
+                                        <div key={i} className={`p-4 border rounded-lg ${dark ? 'border-gray-600 bg-gray-700 text-gray-200' : 'border-gray-300 bg-gray-50'}`}>
+                                            <h3 className="font-bold text-orange-600">TAG: {d.tag}</h3>
+                                            {d.items.map(it => <p key={it.id} className="text-sm">Área: {it.area} | Estado: {getEstado(it.fechaCalibracion, meses, tab.m).label}</p>)}
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="mt-6 flex justify-end"><button onClick={() => setDups(null)} className="px-6 py-2 bg-gray-500 text-white rounded-lg">Cerrar</button></div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Detalle */}
+                    {det && (
+                        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+                            <div className={`${dark ? 'bg-gray-800 border-gray-700' : 'bg-white border-white'} border rounded-3xl shadow-2xl max-w-lg w-full overflow-hidden max-h-[95vh] overflow-y-auto`}>
+                                <div className="bg-gradient-to-r from-blue-600 to-indigo-700 p-6">
+                                    <div className="flex justify-between items-start">
+                                        <div>
+                                            <p className="text-blue-100 text-sm font-medium uppercase tracking-wider">{tab.det}</p>
+                                            <h2 className="text-3xl font-bold text-white mt-1">{det.tag}</h2>
+                                        </div>
+                                        <button onClick={() => setDet(null)} className="bg-white/10 hover:bg-white/20 text-white rounded-full p-2 transition-colors">
+                                            <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                                        </button>
+                                    </div>
+                                </div>
+                                <div className="p-8">
+                                    <div className="grid grid-cols-2 gap-y-6 gap-x-8">
+                                        {[['Área / Unidad', det.area], ['Estado Actual', getEstado(det.fechaCalibracion, meses, tab.m).label], ['Equipo Vinculado', det.equipo || 'No especificado'], ['Ubicación Física', det.ubicacion || 'No especificado'],
+                                        ...tab.extra.map(f => [f.l, valorCampo(f, det)]), ['Última Calibración', formatearFecha(det.fechaCalibracion)]].map(([t, v]) => (
+                                            <div key={t}>
+                                                <p className={`text-xs uppercase tracking-widest font-bold ${dark ? 'text-gray-500' : 'text-gray-400'}`}>{t}</p>
+                                                <p className={`text-base font-semibold mt-1 ${dark ? 'text-gray-100' : 'text-gray-800'}`}>{v}</p>
+                                            </div>
+                                        ))}
+                                        <div>
+                                            <p className={`text-xs uppercase tracking-widest font-bold ${dark ? 'text-gray-500' : 'text-gray-400'}`}>Próxima Calibración</p>
+                                            <div className="flex items-center gap-2 mt-1">
+                                                <p className="text-lg font-black text-blue-600">{getProximaFecha(det.fechaCalibracion, meses)}</p>
+                                                <span className={`text-[10px] px-2 py-0.5 rounded font-bold ${info(det).color}`}>{info(det).label}</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className={`mt-8 p-4 rounded-2xl ${dark ? 'bg-gray-700/50' : 'bg-gray-50'}`}>
+                                        <p className={`text-xs uppercase tracking-widest font-bold ${dark ? 'text-gray-500' : 'text-gray-400'}`}>Observaciones de Campo</p>
+                                        <p className={`mt-2 text-sm leading-relaxed ${dark ? 'text-gray-300' : 'text-gray-600 italic'}`}>{det.observaciones || 'Sin observaciones registradas.'}</p>
+                                    </div>
+                                    <div className="mt-8 pt-6 border-t border-gray-100 flex justify-end">
+                                        <button onClick={() => setDet(null)} className="px-8 py-3 bg-gray-900 text-white rounded-xl font-bold hover:bg-gray-800 transition-all transform hover:scale-105 active:scale-95 shadow-lg">Entendido</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        /* ============================================================
+           APP: login, encabezado, usuarios y barra de pestañas
+           ============================================================ */
+        function App() {
+            const [currentUser, setCurrentUser] = useState(() => { const s = localStorage.getItem('currentUser'); return s ? JSON.parse(s) : null; });
+            const [loginForm, setLoginForm] = useState({ username: '', password: '' });
+            const [users, setUsers] = useState([]);
+            const [custom, setCustom] = useState([]);
+            const [tabId, setTabId] = useState(() => localStorage.getItem('tabId') || 'psv');
+            const [darkMode, setDarkMode] = useState(() => { const s = localStorage.getItem('darkMode'); return s ? JSON.parse(s) : false; });
+            const [showAdminPanel, setShowAdminPanel] = useState(false);
+            const [newUser, setNewUser] = useState({ username: '', password: '', nombre: '', role: 'operador', autorizado: false });
+            const [editingUser, setEditingUser] = useState(null);
+
+            useEffect(() => {
+                if (currentUser) localStorage.setItem('currentUser', JSON.stringify(currentUser)); else localStorage.removeItem('currentUser');
+            }, [currentUser]);
+            useEffect(() => { localStorage.setItem('darkMode', JSON.stringify(darkMode)); }, [darkMode]);
+            useEffect(() => { localStorage.setItem('tabId', tabId); }, [tabId]);
+
+            useEffect(() => {
+                const usersRef = database.ref('users');
+                usersRef.on('value', (s) => {
+                    const v = s.val();
+                    if (v) setUsers(Object.entries(v).map(([id, u]) => ({ id, ...u })));
+                    else database.ref('users').push({ username: 'admin', password: 'admin123', nombre: 'Jefe de Turno', role: 'admin', autorizado: true });
+                });
+                const tabsRef = database.ref('tabs_config');
+                tabsRef.on('value', (s) => {
+                    const v = s.val() || {};
+                    setCustom(Object.entries(v).map(([key, x]) => ({ key, ...x })));
+                });
+                return () => { usersRef.off(); tabsRef.off(); };
+            }, []);
+
+            const tabs = [...TABS, ...custom.map(c => ({
+                id: 'c_' + c.key, key: c.key, custom: true, nombre: c.nombre, corto: c.nombre, singular: 'Equipo',
+                node: 'custom_' + c.key, meses: MESES, extra: [], m: true, det: 'Detalles del Equipo'
+            }))];
+            const tab = tabs.find(t => t.id === tabId) || tabs[0];
+
+            const addTab = () => {
+                const n = window.prompt('Nombre de la nueva pestaña (ej: Válvulas de control)');
+                if (!n || !n.trim()) return;
+                database.ref('tabs_config').push({ nombre: n.trim() }).then(r => setTabId('c_' + r.key));
+            };
+            const deleteTab = () => {
+                if (window.confirm(`¿Quitar la pestaña "${tab.nombre}"? Los equipos cargados no se borran de la base de datos.`)) {
+                    database.ref('tabs_config/' + tab.key).remove();
+                    setTabId('psv');
+                }
+            };
+
+            const handleLogin = () => {
+                if (loginForm.username === 'admin' && loginForm.password === 'admin123') {
+                    setCurrentUser({ username: 'admin', nombre: 'Jefe de Turno', role: 'admin', autorizado: true });
+                    return;
+                }
+                const u = users.find(x => x.username === loginForm.username && x.password === loginForm.password);
+                if (u) setCurrentUser(u); else alert('Usuario o contraseña incorrectos');
+            };
+            const handleAddUser = () => {
+                if (!newUser.username || !newUser.password || !newUser.nombre) { alert('Complete todos los campos'); return; }
+                database.ref('users').push(newUser);
+                setNewUser({ username: '', password: '', nombre: '', role: 'operador', autorizado: false });
+                alert('Usuario creado exitosamente');
+            };
+            const handleUpdateUser = () => {
+                const u = editingUser;
+                if (!u.username || !u.password || !u.nombre) { alert('Complete todos los campos obligatorios'); return; }
+                database.ref('users/' + u.id).update({ username: u.username, password: u.password, nombre: u.nombre, role: u.role, autorizado: u.autorizado })
+                    .then(() => { setEditingUser(null); alert('Usuario actualizado exitosamente'); })
+                    .catch(e => alert('Error al actualizar: ' + e.message));
+            };
+
+            const dark = darkMode;
+
+            if (!currentUser) {
+                return (
+                    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
+                        <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
+                            <div className="flex justify-center mb-6">
+                                <div className="bg-blue-600 p-4 rounded-full">
+                                    <svg className="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" /></svg>
+                                </div>
+                            </div>
+                            <h1 className="text-3xl font-bold text-slate-800 text-center">Control de Instrumentación</h1>
+                            <p className="text-slate-600 mt-2 text-center">Planta Tratayén</p>
+                            <p className="text-green-600 text-sm mt-2 text-center">🟢 Conectado</p>
+                            <div className="space-y-4 mt-6">
+                                <input type="text" value={loginForm.username} onChange={e => setLoginForm({ ...loginForm, username: e.target.value })} onKeyPress={e => e.key === 'Enter' && handleLogin()} className="w-full px-4 py-3 border rounded-lg" placeholder="Usuario" />
+                                <input type="password" value={loginForm.password} onChange={e => setLoginForm({ ...loginForm, password: e.target.value })} onKeyPress={e => e.key === 'Enter' && handleLogin()} className="w-full px-4 py-3 border rounded-lg" placeholder="Contraseña" />
+                                <button onClick={handleLogin} className="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700">Iniciar Sesión</button>
+                            </div>
+                        </div>
+                    </div>
+                );
+            }
+
+            const th = `px-4 py-3 text-left ${dark ? 'text-gray-300' : 'text-gray-900'}`;
+            const field = `px-3 py-2 border rounded ${dark ? 'bg-gray-700 text-white border-gray-600' : 'bg-white'}`;
+
+            return (
+                <div className={`min-h-screen ${dark ? 'bg-gray-900' : 'bg-gray-50'}`}>
+                    {/* Header */}
+                    <div className={`${dark ? 'bg-gray-800' : 'bg-white'} shadow-lg p-4 sticky top-0 z-10`}>
+                        <div className="max-w-7xl mx-auto flex justify-between items-center">
+                            <div>
+                                <h1 className={`text-2xl font-bold ${dark ? 'text-white' : 'text-slate-800'}`}>Control de Instrumentación - Planta Tratayén</h1>
+                                <p className={dark ? 'text-gray-300' : 'text-slate-600'}>Bienvenido</p>
+                            </div>
+                            <div className="flex items-center gap-2 sm:gap-4">
+                                {currentUser.role === 'admin' && (
+                                    <button onClick={() => setShowAdminPanel(!showAdminPanel)}
+                                        className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold transition-all duration-300 transform hover:-translate-y-0.5 active:scale-95 ${showAdminPanel ? 'bg-purple-600 text-white shadow-lg shadow-purple-500/30' : (dark ? 'bg-purple-900/30 text-purple-400 border border-purple-500/30 hover:bg-purple-600 hover:text-white' : 'bg-purple-50 text-purple-700 hover:bg-purple-600 hover:text-white border border-purple-200')}`}>
+                                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
+                                        <span className="hidden md:inline">Gestión de Usuarios</span>
+                                    </button>
+                                )}
+                                <button onClick={() => setDarkMode(!dark)}
+                                    className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold transition-all duration-300 transform hover:-translate-y-0.5 active:scale-95 ${dark ? 'bg-amber-100 text-amber-700 shadow-lg shadow-amber-500/20' : 'bg-slate-800 text-white shadow-lg shadow-slate-900/20 border border-slate-700'}`}>
+                                    {dark ? (<>
+                                        <svg className="w-5 h-5 text-amber-500" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 6.464A1 1 0 106.465 5.05l-.708-.707a1 1 0 00-1.414 1.414l.707.707zm1.414 8.486l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 1.414zM4 11a1 1 0 100-2H3a1 1 0 000 2h1z" clipRule="evenodd" /></svg>
+                                        <span className="hidden md:inline text-amber-700">Modo Día</span>
+                                    </>) : (<>
+                                        <svg className="w-5 h-5 text-indigo-400" fill="currentColor" viewBox="0 0 20 20"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z" /></svg>
+                                        <span className="hidden md:inline">Modo Noche</span>
+                                    </>)}
+                                </button>
+                                <button onClick={() => setCurrentUser(null)}
+                                    className={`flex items-center gap-2 px-6 py-2.5 rounded-xl font-bold transition-all duration-300 transform hover:-translate-y-0.5 active:scale-95 ${dark ? 'bg-rose-900/30 text-rose-400 border border-rose-500/30 hover:bg-rose-600 hover:text-white' : 'bg-white text-rose-600 border border-rose-100 hover:bg-rose-600 hover:text-white shadow-sm'}`}>
+                                    <svg className="w-5 h-5 text-rose-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
+                                    <span className="hidden md:inline">Salir</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
+                    {/* Barra de pestañas */}
+                    <div className="max-w-7xl mx-auto px-6 pt-5 flex gap-2 overflow-x-auto items-center">
+                        {tabs.map(t => (
+                            <button key={t.id} onClick={() => setTabId(t.id)}
+                                className={`px-5 py-2.5 rounded-xl font-bold whitespace-nowrap transition-all duration-300 transform hover:-translate-y-0.5 active:scale-95 ${t.id === tab.id ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/30' : (dark ? 'bg-gray-800 text-gray-300 border border-gray-700 hover:bg-gray-700' : 'bg-white text-slate-700 border border-gray-200 hover:bg-blue-50 shadow-sm')}`}>
+                                {t.nombre}
+                            </button>
+                        ))}
+                        {currentUser.role === 'admin' && (<>
+                            <button onClick={addTab} title="Agregar pestaña"
+                                className={`px-4 py-2.5 rounded-xl font-bold transition-all duration-300 active:scale-95 ${dark ? 'bg-green-900/30 text-green-400 border border-green-500/30 hover:bg-green-600 hover:text-white' : 'bg-green-50 text-green-700 border border-green-200 hover:bg-green-600 hover:text-white'}`}>＋</button>
+                            {tab.custom && <button onClick={deleteTab} title="Quitar esta pestaña" className={`px-3 py-2.5 rounded-xl font-bold text-sm ${dark ? 'text-rose-400 hover:bg-rose-900/30' : 'text-rose-600 hover:bg-rose-50'}`}>🗑️ Quitar pestaña</button>}
+                        </>)}
+                    </div>
+
+                    {/* Gestión de usuarios (solo admin) */}
+                    {showAdminPanel && currentUser.role === 'admin' && (
+                        <div className="max-w-7xl mx-auto p-6 pb-0">
+                            <div className={`${dark ? 'bg-gray-800' : 'bg-white'} rounded-lg shadow p-6`}>
+                                <h2 className={`text-2xl font-bold mb-4 ${dark ? 'text-white' : 'text-gray-900'}`}>Gestión de Usuarios</h2>
+                                <div className="mb-6 p-4 border rounded-lg">
+                                    <h3 className={`text-lg font-semibold mb-3 ${dark ? 'text-white' : 'text-gray-900'}`}>Crear Nuevo Usuario</h3>
+                                    <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                                        <input type="text" placeholder="Usuario" value={newUser.username} onChange={e => setNewUser({ ...newUser, username: e.target.value })} className={field} />
+                                        <input type="text" placeholder="Contraseña" value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })} className={field} />
+                                        <input type="text" placeholder="Nombre completo" value={newUser.nombre} onChange={e => setNewUser({ ...newUser, nombre: e.target.value })} className={field} />
+                                        <button onClick={handleAddUser} className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700">➕ Crear Usuario</button>
+                                    </div>
+                                </div>
+                                <div className="overflow-x-auto">
+                                    <table className="w-full">
+                                        <thead className={dark ? 'bg-gray-700' : 'bg-gray-100'}>
+                                            <tr>{['Usuario', 'Nombre', 'Rol', 'Contraseña', 'Autorización', 'Acciones'].map(h => <th key={h} className={th}>{h}</th>)}</tr>
+                                        </thead>
+                                        <tbody>
+                                            {users.map(u => (
+                                                <tr key={u.id} className={`border-b ${dark ? 'border-gray-700' : 'border-gray-200'}`}>
+                                                    <td className={`px-4 py-3 ${dark ? 'text-gray-300' : 'text-gray-900'}`}>{u.username}</td>
+                                                    <td className={`px-4 py-3 ${dark ? 'text-gray-300' : 'text-gray-900'}`}>{u.nombre}</td>
+                                                    <td className="px-4 py-3"><span className={`px-2 py-1 rounded text-sm ${u.role === 'admin' ? 'bg-purple-100 text-purple-800' : 'bg-blue-100 text-blue-800'}`}>{u.role === 'admin' ? 'Administrador' : 'Operador'}</span></td>
+                                                    <td className={`px-4 py-3 font-mono ${dark ? 'text-gray-300' : 'text-gray-900'}`}>{u.password}</td>
+                                                    <td className="px-4 py-3">
+                                                        {u.role !== 'admin' && (
+                                                            <button onClick={() => database.ref('users/' + u.id).update({ autorizado: !u.autorizado })}
+                                                                className={`px-3 py-1 rounded text-sm font-semibold ${u.autorizado ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                                                                {u.autorizado ? '✓ Autorizado' : '✗ Sin Autorización'}
+                                                            </button>
+                                                        )}
+                                                    </td>
+                                                    <td className="px-4 py-3">
+                                                        <div className="flex gap-2">
+                                                            <button onClick={() => setEditingUser({ ...u })} className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">✏️</button>
+                                                            {u.role !== 'admin' && <button onClick={() => window.confirm('¿Está seguro de eliminar este usuario?') && database.ref('users/' + u.id).remove()} className="px-3 py-1 bg-red-600 text-white rounded text-sm hover:bg-red-700">🗑️</button>}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Contenido de la pestaña activa */}
+                    <Panel key={tab.id} tab={tab} user={currentUser} dark={dark} />
+
+                    {editingUser && (
+                        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+                            <div className={`${dark ? 'bg-gray-800 text-white' : 'bg-white'} rounded-lg p-6 max-w-md w-full`}>
+                                <h2 className="text-2xl font-bold mb-4">Editar Usuario</h2>
+                                <input type="text" value={editingUser.username} onChange={e => setEditingUser({ ...editingUser, username: e.target.value })} className={`w-full mb-3 ${field}`} />
+                                <input type="text" value={editingUser.password} onChange={e => setEditingUser({ ...editingUser, password: e.target.value })} className={`w-full mb-3 ${field}`} />
+                                <input type="text" value={editingUser.nombre} onChange={e => setEditingUser({ ...editingUser, nombre: e.target.value })} className={`w-full mb-3 ${field}`} />
+                                <select value={editingUser.role} onChange={e => setEditingUser({ ...editingUser, role: e.target.value })} className={`w-full mb-3 ${field}`}>
+                                    <option value="operador">Operador</option>
+                                    <option value="admin">Administrador</option>
+                                </select>
+                                <label className="flex items-center gap-2 mb-4">
+                                    <input type="checkbox" checked={!!editingUser.autorizado} onChange={e => setEditingUser({ ...editingUser, autorizado: e.target.checked })} /> Autorizado
+                                </label>
+                                <div className="flex gap-2">
+                                    <button onClick={handleUpdateUser} className="flex-1 bg-blue-600 text-white py-2 rounded">Guardar</button>
+                                    <button onClick={() => setEditingUser(null)} className="flex-1 bg-gray-500 text-white py-2 rounded">Cerrar</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+
+</html>
